@@ -239,12 +239,14 @@ namespace mylib {
             const auto final_result = other.entering_counter.exchange(other_next, std::memory_order_relaxed);
             other.full_mark.store(false, std::memory_order_release);
             const auto total_candidates = final_result & ~top_bit_mask;
-            values_view result(other.queue_handles[other_curr ? 1 : 0]->wait_for_exclusive_values(total_candidates));
+            auto& other_handle = other.queue_handles[other_curr ? 1 : 0];
+            values_view result(other_handle->wait_for_exclusive_values(total_candidates));
             // Now stolen buffer is exclusive
 
             const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
             const auto next = curr ^ top_bit_mask;
-            std::ranges::swap(this->queue_handles[next ? 1 : 0], other.queue_handles[other_curr ? 1 : 0]);
+            auto& this_handle = this->queue_handles[next ? 1 : 0];
+            std::ranges::swap(this_handle, other_handle);
 
             return result;
         }
