@@ -1,20 +1,15 @@
-#include <type_traits>
 #ifndef MYLIB_CONCURRENT_QUEUE_H
 #define MYLIB_CONCURRENT_QUEUE_H 1
 
 #include <concepts>
 #include <cstddef>
-#include <cstdint>
 
 #include <iterator>
 #include <ranges>
-#include <functional>
 #include <array>
-#include <bit>
 #include <new>
 #include <atomic>
 #include <thread>
-#include <limits>
 #include <memory>
 #include <cassert>
 

@@ -1,9 +1,9 @@
+#ifdef MYLIB_CONCURRENT_QUEUE_DEPRECATED_H
+
+#ifndef MYLIB_CONCURRENT_QUEUE_H
 #define MYLIB_CONCURRENT_QUEUE_H -1
 
 // Deprecated header file for concurrent queue implementation
-
-#ifndef MYLIB_CONCURRENT_QUEUE_H
-#define MYLIB_CONCURRENT_QUEUE_H 1
 
 #include <concepts>
 #include <cstddef>
@@ -297,3 +297,5 @@ namespace mylib {
 } // namespace mylib
 
 #endif // MYLIB_CONCURRENT_QUEUE_H
+
+#endif // MYLIB_CONCURRENT_QUEUE_DEPRECATED_H
