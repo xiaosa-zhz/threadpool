@@ -1,6 +1,14 @@
 #ifndef MYLIB_CONCURRENT_QUEUE_H
 #define MYLIB_CONCURRENT_QUEUE_H 1
 
+/*
+    * Header file for concurrent queue implementation
+    * 
+    * This file provides a thread-safe queue that allows multiple producers and ONE consumer.
+    * It is designed to have a dequeue API different from the OG queue API
+    * which fetches all values enqueued since the last dequeue call at once.
+*/
+
 #include <concepts>
 #include <cstddef>
 
