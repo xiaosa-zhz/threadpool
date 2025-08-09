@@ -1,4 +1,7 @@
-#include <type_traits>
+#define MYLIB_CONCURRENT_QUEUE_H -1
+
+// Deprecated header file for concurrent queue implementation
+
 #ifndef MYLIB_CONCURRENT_QUEUE_H
 #define MYLIB_CONCURRENT_QUEUE_H 1
 
@@ -16,12 +19,11 @@
 #include <thread>
 #include <limits>
 #include <memory>
-#include <cassert>
 
 namespace mylib {
 
     namespace details {
-    
+
         template<typename F>
         struct defer {
             ~defer() { this->f(); }
@@ -33,12 +35,10 @@ namespace mylib {
         struct alignas(queue_align) queue_head
         {
             const std::size_t capacity;
-            std::size_t size = 0;
-            std::atomic_size_t leaving_counter = 0;
+            std::atomic_size_t tail = 0;
         };
 
         template<typename T>
-            requires std::default_initializable<T> && std::destructible<T> && (std::is_nothrow_swappable_v<T>)
         struct alignas(queue_align) queue_cell
         {
             T value;
@@ -58,25 +58,30 @@ namespace mylib {
             static_assert(sizeof(queue_head) <= sizeof(cell_type));
 
             std::size_t capacity() const noexcept { return this->queue_head::capacity; }
-            std::size_t size() const noexcept { return this->queue_head::size; }
+            std::size_t size() const noexcept {
+                return std::min(this->tail.load(std::memory_order_relaxed), capacity());
+            }
 
-            bool full() const noexcept { return this->leaving_counter.load(std::memory_order_relaxed) >= capacity(); }
+            bool full() const noexcept { return this->tail.load(std::memory_order_relaxed) >= capacity(); }
 
-            bool enqueue(std::size_t queue_number, value_type&& v) noexcept {
-                defer _([this] { this->leaving_counter.fetch_add(1, std::memory_order_release); });
-                if (queue_number >= capacity()) {
+            bool enqueue(value_type&& v) noexcept {
+                if (this->exclusive.test(std::memory_order_relaxed)) {
                     return false;
                 }
-                std::ranges::swap(v, storage()[queue_number].value);
+                auto _ = this->guard();
+                if (full()) return false;
+                const auto i = this->tail.fetch_add(1, std::memory_order_relaxed);
+                if (i >= capacity()) return false;
+                storage()[i] = std::move(v);
                 return true;
             }
 
-            std::span<cell_type> wait_for_exclusive_values(std::size_t total_candidates) noexcept {
-                while (this->leaving_counter.load(std::memory_order_acquire) < total_candidates) {
-                    std::this_thread::yield(); // TODO: maybe do something else while waiting?
+            std::span<cell_type> wait_for_exclusive_values() noexcept {
+                this->exclusive.test_and_set(std::memory_order_relaxed);
+                while (this->shared_counter.load(std::memory_order_acquire) > 0) {
+                    std::this_thread::yield();
                 }
-                this->leaving_counter.store(0, std::memory_order_relaxed);
-                this->queue_head::size = std::min(total_candidates, capacity());
+                this->exclusive.clear(std::memory_order_relaxed);
                 return storage().subspan(0, size());
             }
 
@@ -97,15 +102,11 @@ namespace mylib {
                 const size_t capacity = ptr->capacity();
                 ptr->~queue_buffer();
                 std::destroy_n(std::make_reverse_iterator(to_storage_ptr(ptr) + capacity), capacity);
-                ::operator delete(ptr, std::align_val_t(final_alignment));
+                ::operator delete(ptr);
             }
 
         private:
             explicit queue_buffer(std::size_t capacity) noexcept : queue_head(capacity) {}
-            queue_buffer(const queue_buffer&) = delete;
-            queue_buffer& operator=(const queue_buffer&) = delete;
-            queue_buffer(queue_buffer&&) = delete;
-            queue_buffer& operator=(queue_buffer&&) = delete;
 
             static cell_type* to_storage_ptr(queue_buffer* ptr) noexcept {
                 return std::launder(reinterpret_cast<cell_type*>(
@@ -113,21 +114,44 @@ namespace mylib {
                 ));
             }
 
+            auto guard() noexcept {
+                this->shared_counter.fetch_add(1, std::memory_order_relaxed);
+                return details::defer([this] { this->shared_counter.fetch_sub(1, std::memory_order_release); });
+            }
+
             std::span<cell_type> storage() noexcept {
                 return std::span<cell_type>(to_storage_ptr(this), capacity());
             }
         };
-        
-    } // namespace details
+
+        template<typename T, std::size_t TAG_BIT_LENGTH = 3>
+        struct tagged_pointer
+        {
+            constexpr static std::size_t alignment_requirement = (1ull << TAG_BIT_LENGTH);
+            static_assert(alignof(T) >= alignment_requirement);
+            constexpr static std::uintptr_t tag_mask = alignment_requirement - 1;
+            constexpr static std::uintptr_t ptr_mask = ~tag_mask;
+            static_assert(tag_mask + ptr_mask == ~std::uintptr_t(0));
+
+            static tagged_pointer from_pointer(T* ptr) noexcept {
+                return tagged_pointer(reinterpret_cast<std::uintptr_t>(ptr));
+            }
+
+            T* pointer() const noexcept { return reinterpret_cast<T*>(ptrv & ptr_mask); }
+            std::uintptr_t tag() const noexcept { return ptrv & tag_mask; }
+
+            std::uintptr_t ptrv;
+        };
+
+    } // namespace mylib::details
 
     template<typename T>
-    class alignas(std::hardware_constructive_interference_size) concurrent_queue
+    class queue
     {
     public:
         using value_type = T;
         using queue_unit_type = details::queue_buffer<value_type>;
         using queue_unit_handle_type = std::unique_ptr<queue_unit_type>;
-        constexpr static std::size_t top_bit_mask = ~((~0uz) >> 1);
     private:
         using cell_type = details::queue_cell<value_type>;
     public:
@@ -137,10 +161,9 @@ namespace mylib {
         public:
             struct iterator
             {
-                using iterator_category = std::random_access_iterator_tag;
+                using iterator_concept = std::random_access_iterator_tag;
+                using value_type = queue::value_type;
                 using difference_type = std::ptrdiff_t;
-                using value_type = concurrent_queue::value_type;
-                using reference = value_type&;
 
                 iterator() = default;
                 iterator(const iterator&) = default;
@@ -181,8 +204,9 @@ namespace mylib {
             iterator end() const noexcept { return iterator(original.data() + original.size()); }
             
         private:
-            using original_view = std::span<typename queue_unit_type::cell_type>;
-            friend concurrent_queue;
+            using original_view = std::span<details::queue_cell<value_type>>;
+
+            friend queue;
             explicit values_view(original_view o) noexcept : original(o) {}
 
             original_view original = original_view();
@@ -190,79 +214,86 @@ namespace mylib {
 
         static_assert(std::ranges::random_access_range<values_view>);
 
-        concurrent_queue() = delete;
-        concurrent_queue(const concurrent_queue&) = delete;
-        concurrent_queue& operator=(const concurrent_queue&) = delete;
-        concurrent_queue(concurrent_queue&&) = delete;
-        concurrent_queue& operator=(concurrent_queue&&) = delete;
+        queue() : queue(128) {}
 
-        explicit concurrent_queue(std::size_t capacity)
-            : queue_handles{ queue_unit_type::make(capacity), queue_unit_type::make(capacity) }
+        explicit queue(std::size_t capacity) :
+            enqueue_handle(queue_unit_handle_type::make(capacity)),
+            dequeue_handle(queue_unit_handle_type::make(capacity)),
+            enqueue_ptr(enqueue_handle.get())
         {}
 
+        ~queue() { (void) stop(); }
+
+        queue(const queue&) = delete;
+        queue& operator=(const queue&) = delete;
+
+        void start() noexcept {
+            enqueue_ptr.store(enqueue_handle.get(), std::memory_order_relaxed);
+            stealing.clear(std::memory_order_release);
+        }
+
+        values_view stop() noexcept {
+            while (stealing.test_and_set(std::memory_order_acq_rel));
+            return enqueue_ptr.exchange(nullptr, std::memory_order_acquire)->wait_for_exclusive_values();
+        }
+
+        [[nodiscard]]
         bool enqueue(value_type&& v) noexcept {
-            if (this->full_mark.load(std::memory_order_acquire)) {
+            const std::uintptr_t raw = this->enqueue_ptr.load(std::memory_order_relaxed);
+            if (queue_unit_type* const cur = to_pointer(raw)) {
+                return cur->enqueue(std::move(v));
+            } else {
                 return false;
             }
-            const auto queue_token = this->entering_counter.fetch_add(1, std::memory_order_relaxed);
-            const auto queue_index = queue_token & top_bit_mask;
-            const auto queue_number = queue_token & ~top_bit_mask;
-            const bool result = this->queue_handles[queue_index ? 1 : 0]->enqueue(queue_number, std::move(v));
-            if (!result) {
-                this->full_mark.store(true, std::memory_order_relaxed);
-            }
-            return result;
         }
 
-        values_view wait_for_exclusive_values() noexcept {
-            while (stealing_lock.test_and_set(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-            details::defer _([this] { this->stealing_lock.clear(std::memory_order_release); });
-
-            const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto next = curr ^ top_bit_mask;
-            const auto final_result = this->entering_counter.exchange(next, std::memory_order_relaxed);
-            this->full_mark.store(false, std::memory_order_release);
-            const auto total_candidates = final_result & ~top_bit_mask;
-            return values_view(this->queue_handles[curr ? 1 : 0]->wait_for_exclusive_values(total_candidates));
+        values_view fetch_values() noexcept {
+            switch_enqueue_handle(dequeue_handle);
+            return wait_for_exclusive_values();
         }
 
-        values_view steal(concurrent_queue& other) noexcept {
-            while (stealing_lock.test_and_set(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-            details::defer _([this] { this->stealing_lock.clear(std::memory_order_release); });
-
-            if (other.stealing_lock.test_and_set(std::memory_order_acquire)) {
-                return values_view();
-            }
-            details::defer _([&other] { other.stealing_lock.clear(std::memory_order_release); });
-
-            const auto other_curr = other.entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto other_next = other_curr ^ top_bit_mask;
-            const auto final_result = other.entering_counter.exchange(other_next, std::memory_order_relaxed);
-            other.full_mark.store(false, std::memory_order_release);
-            const auto total_candidates = final_result & ~top_bit_mask;
-            values_view result(other.queue_handles[other_curr ? 1 : 0]->wait_for_exclusive_values(total_candidates));
-            // Now stolen buffer is exclusive
-
-            const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto next = curr ^ top_bit_mask;
-            std::ranges::swap(this->queue_handles[next ? 1 : 0], other.queue_handles[other_curr ? 1 : 0]);
-
-            return result;
+        values_view steal(queue& other) noexcept {
+            other.switch_enqueue_handle(this->dequeue_handle);
+            return wait_for_exclusive_values();
         }
 
     private:
-        std::array<queue_unit_handle_type, 2> queue_handles;
-        std::atomic_size_t entering_counter = 0;
-        std::atomic_flag stealing_lock = {};
-        std::atomic_bool full_mark = false;
+        constexpr static std::uintptr_t tag_mask = 1;
+        constexpr static std::uintptr_t ptr_mask = ~tag_mask;
+
+        static queue_unit_type* to_pointer(std::uintptr_t raw) noexcept {
+            return reinterpret_cast<queue_unit_type*>(raw & ptr_mask);
+        }
+
+        static std::uintptr_t from_pointer(queue_unit_type* ptr) noexcept {
+            return reinterpret_cast<std::uintptr_t>(ptr);
+        }
+
+        void switch_enqueue_handle(queue_unit_handle_type& new_enqueue_handle) noexcept {
+            std::uintptr_t raw = this->enqueue_ptr.load(std::memory_order_relaxed);
+            do {
+                if (raw & tag_mask) {
+                    std::this_thread::yield();
+                    raw = this->enqueue_ptr.load(std::memory_order_relaxed);
+                    continue;
+                }
+            } while (!this->enqueue_ptr.compare_exchange_strong(
+                raw, (raw | std::uintptr_t(1)), std::memory_order_acq_rel));
+            std::ranges::swap(this->enqueue_handle, new_enqueue_handle);
+            enqueue_ptr.store(from_pointer(this->enqueue_handle.get()), std::memory_order_release);
+        }
+
+        values_view wait_for_exclusive_values() noexcept {
+            return values_view(dequeue_handle->wait_for_exclusive_values());
+        }
+
+        struct alignas(details::queue_align) {
+            std::atomic<std::uintptr_t> enqueue_ptr;
+            queue_unit_handle_type enqueue_handle;
+        };
+        queue_unit_handle_type dequeue_handle;
     };
-
-    static_assert(sizeof(concurrent_queue<std::size_t>) <= std::hardware_constructive_interference_size);
-
+    
 } // namespace mylib
 
 #endif // MYLIB_CONCURRENT_QUEUE_H
