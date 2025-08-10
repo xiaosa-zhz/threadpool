@@ -7,7 +7,11 @@
 
 #include "concurrent_queue.hpp"
 
+#ifdef __cpp_lib_move_only_function
 using job = std::move_only_function<void()>;
+#else
+using job = std::function<void()>;
+#endif
 
 // #define MYDEBUG 1
 
