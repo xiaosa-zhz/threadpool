@@ -161,6 +161,12 @@ void test_2() {
     producers.clear();
     consumer1.join();
     consumer2.join();
+    std::println("Total jobs processed: {}", job_counter.load(std::memory_order_relaxed));
+    if (c1 + c2 != job_counter.load(std::memory_order_relaxed)) {
+        std::println("Counter mismatch: {} + {} != {}", c1, c2, job_counter.load(std::memory_order_relaxed));
+    } else {
+        std::println("All jobs executed successfully.");
+    }
     std::println("Consumer 1 processed {} jobs, Consumer 2 processed {} jobs.", c1, c2);
     std::println("Consumer 1 stole {} jobs, Consumer 2 stole {} jobs.", cs1, cs2);
 }

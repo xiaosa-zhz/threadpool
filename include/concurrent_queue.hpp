@@ -138,8 +138,9 @@ namespace mylib {
             : public std::ranges::view_interface<values_view>
         {
         public:
-            struct iterator
+            class iterator
             {
+            public:
                 using iterator_category = std::random_access_iterator_tag;
                 using difference_type = std::ptrdiff_t;
                 using value_type = concurrent_queue::value_type;
@@ -200,7 +201,11 @@ namespace mylib {
         concurrent_queue& operator=(concurrent_queue&&) = delete;
 
         explicit concurrent_queue(std::size_t capacity)
-            : queue_handles{ queue_unit_type::make(capacity), queue_unit_type::make(capacity) }
+            : queue_handles{
+                queue_unit_type::make(capacity),
+                queue_unit_type::make(capacity),
+                queue_unit_type::make(capacity)
+            }
         {}
 
         bool enqueue(value_type&& v) noexcept {
@@ -228,15 +233,13 @@ namespace mylib {
             const auto final_result = this->entering_counter.exchange(next, std::memory_order_relaxed);
             this->full_mark.store(false, std::memory_order_release);
             const auto total_candidates = final_result & ~top_bit_mask;
-            return values_view(this->queue_handles[curr ? 1 : 0]->wait_for_exclusive_values(total_candidates));
+            auto& queue_handle = this->queue_handles[curr ? 1 : 0];
+            values_view result(queue_handle->wait_for_exclusive_values(total_candidates));
+            std::ranges::swap(queue_handle, this->queue_handles[2]);
+            return result;
         }
 
         values_view steal(concurrent_queue& other) noexcept {
-            while (stealing_lock.test_and_set(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-            details::defer _([this] { this->stealing_lock.clear(std::memory_order_release); });
-
             if (other.stealing_lock.test_and_set(std::memory_order_acquire)) {
                 return values_view();
             }
@@ -250,17 +253,12 @@ namespace mylib {
             auto& other_handle = other.queue_handles[other_curr ? 1 : 0];
             values_view result(other_handle->wait_for_exclusive_values(total_candidates));
             // Now stolen buffer is exclusive
-
-            const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto next = curr ^ top_bit_mask;
-            auto& this_handle = this->queue_handles[next ? 1 : 0];
-            std::ranges::swap(this_handle, other_handle);
-
+            std::ranges::swap(other_handle, this->queue_handles[2]);
             return result;
         }
 
     private:
-        std::array<queue_unit_handle_type, 2> queue_handles;
+        std::array<queue_unit_handle_type, 3> queue_handles;
         std::atomic_size_t entering_counter = 0;
         std::atomic_flag stealing_lock = {};
         std::atomic_bool full_mark = false;
