@@ -1,3 +1,7 @@
+/*
+    * This file provides a simplified demonstration of how concurrent_queue works
+*/
+
 #include <cstddef>
 #include <atomic>
 #include <memory>
@@ -18,25 +22,25 @@ struct buffers {
     buffer& read() {
         const auto curr = mask & shared_counter.load(std::memory_order_relaxed);
         const auto next = mask ^ curr;
-        auto prev_counter = shared_counter.exchange(next, std::memory_order_relaxed) & (~mask);
-        buffer& rt = *bs[curr ? 1 : 0];
-        while (rt.local_counter.load(std::memory_order_acquire) != prev_counter) {
+        auto prev_counter = (~mask) & shared_counter.exchange(next, std::memory_order_relaxed);
+        buffer& bf = *bs[curr ? 1 : 0];
+        while (bf.local_counter.load(std::memory_order_acquire) != prev_counter) {
             std::println("wait for local_counter to match shared_counter");
             std::this_thread::yield();
         }
-        return rt;
+        return bf;
     }
 
     bool write() {
         const auto curr = mask & shared_counter.fetch_add(1, std::memory_order_relaxed);
-        auto& rt = *bs[curr ? 1 : 0];
+        auto& bf = *bs[curr ? 1 : 0];
 
         // Do write things
         {
-            rt.buffer_placeholder[0] = 42; // Example write operation
+            bf.buffer_placeholder[0] = 42; // Example write operation
         }
 
-        auto prev_counter = rt.local_counter.fetch_add(1, std::memory_order_release);
+        (void) bf.local_counter.fetch_add(1, std::memory_order_release);
         return true;
     }
 };
