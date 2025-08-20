@@ -209,7 +209,7 @@ namespace mylib {
         {}
 
         bool enqueue(value_type&& v) noexcept {
-            if (this->full_mark.load(std::memory_order_acquire)) {
+            if (this->full_flag.load(std::memory_order_relaxed)) {
                 return false;
             }
             const auto queue_token = this->entering_counter.fetch_add(1, std::memory_order_relaxed);
@@ -217,7 +217,7 @@ namespace mylib {
             const auto queue_number = queue_token & ~top_bit_mask;
             const bool result = this->queue_handles[queue_index ? 1 : 0]->enqueue(queue_number, std::move(v));
             if (!result) {
-                this->full_mark.store(true, std::memory_order_relaxed);
+                this->full_flag.store(true, std::memory_order_relaxed);
             }
             return result;
         }
@@ -228,12 +228,7 @@ namespace mylib {
             }
             details::defer _([this] { this->stealing_lock.clear(std::memory_order_release); });
 
-            const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto next = curr ^ top_bit_mask;
-            const auto final_result = this->entering_counter.exchange(next, std::memory_order_relaxed);
-            this->full_mark.store(false, std::memory_order_release);
-            const auto total_candidates = final_result & ~top_bit_mask;
-            auto& queue_handle = this->queue_handles[curr ? 1 : 0];
+            auto [queue_handle, total_candidates] = this->fetch_current_handle();
             values_view result(queue_handle->wait_for_exclusive_values(total_candidates));
             std::ranges::swap(queue_handle, this->queue_handles[2]);
             return result;
@@ -245,23 +240,30 @@ namespace mylib {
             }
             details::defer _([&other] { other.stealing_lock.clear(std::memory_order_release); });
 
-            const auto other_curr = other.entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
-            const auto other_next = other_curr ^ top_bit_mask;
-            const auto final_result = other.entering_counter.exchange(other_next, std::memory_order_relaxed);
-            other.full_mark.store(false, std::memory_order_release);
-            const auto total_candidates = final_result & ~top_bit_mask;
-            auto& other_handle = other.queue_handles[other_curr ? 1 : 0];
+            auto [other_handle, total_candidates] = other.fetch_current_handle();
             values_view result(other_handle->wait_for_exclusive_values(total_candidates));
-            // Now stolen buffer is exclusive
             std::ranges::swap(other_handle, this->queue_handles[2]);
             return result;
         }
 
     private:
+        struct fetch_result {
+            queue_unit_handle_type& handle;
+            std::size_t total_candidates;
+        };
+        
+        fetch_result fetch_current_handle() noexcept {
+            const auto curr = this->entering_counter.load(std::memory_order_relaxed) & top_bit_mask;
+            const auto next = curr ^ top_bit_mask;
+            const auto final_result = this->entering_counter.exchange(next, std::memory_order_relaxed);
+            this->full_flag.store(false, std::memory_order_relaxed);
+            return { this->queue_handles[curr ? 1 : 0], final_result & ~top_bit_mask };
+        }
+
         std::array<queue_unit_handle_type, 3> queue_handles;
         std::atomic_size_t entering_counter = 0;
         std::atomic_flag stealing_lock = {};
-        std::atomic_bool full_mark = false;
+        std::atomic_bool full_flag = false;
     };
 
     static_assert(sizeof(concurrent_queue<std::size_t>) <= std::hardware_constructive_interference_size);

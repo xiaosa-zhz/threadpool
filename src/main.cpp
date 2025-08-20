@@ -165,9 +165,10 @@ void test_2() {
     producers.clear();
     consumer1.join();
     consumer2.join();
-    std::println("Total jobs processed: {}", job_counter.load(std::memory_order_relaxed));
-    if (c1 + c2 != job_counter.load(std::memory_order_relaxed)) {
-        std::println("Counter mismatch: {} + {} != {}", c1, c2, job_counter.load(std::memory_order_relaxed));
+    const auto final_job_count = job_counter.load(std::memory_order_relaxed);
+    std::println("Total jobs processed: {}", final_job_count);
+    if (c1 + c2 != final_job_count) {
+        std::println("Counter mismatch: {} + {} != {}", c1, c2, final_job_count);
     } else {
         std::println("All jobs executed successfully.");
     }
